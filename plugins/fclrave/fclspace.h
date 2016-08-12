@@ -42,9 +42,9 @@ Vector ConvertQuaternionFromFCL(fcl::Quaternion3f const &v) {
     return Vector(v.getW(), v.getX(), v.getY(), v.getZ());
 }
 
-fcl::AABB ConvertAABBToFcl(const OpenRAVE::AABB& bv) {
+/*fcl::AABB ConvertAABBToFcl(const OpenRAVE::AABB& bv) {
     return fcl::AABB(fcl::AABB(ConvertVectorToFCL(bv.pos)), ConvertVectorToFCL(bv.extents));
-}
+}*/
 
 
 template <class T>
@@ -181,13 +181,15 @@ public:
             if( !!pinfo ) {
                 pinfo->Reset();
             }
+
+            _currentpinfo.erase((uintptr_t) (*itbody).get());
 //            bool is_consistent = (*itbody)->RemoveUserData(_userdatakey);
 //            if( !is_consistent ) {
 //                RAVELOG_WARN("inconsistency detected with fclspace user data\n");
 //            }
         }
-        _currentpinfo.clear();
-        _cachedpinfo.clear();
+        //_currentpinfo.clear();
+        //_cachedpinfo.clear();
         _setInitializedBodies.clear();
     }
 
@@ -249,19 +251,22 @@ public:
 
             if( link->vgeoms.size() == 0 ) {
                 RAVELOG_WARN_FORMAT("Initializing link %s/%s with 0 geometries",pbody->GetName()%(*itlink)->GetName());
+            }
+            else if( link->vgeoms.size() == 1) {
+                // set the unique geometry as its own bounding volume
+                link->linkBV = link->vgeoms[0];
             } else {
                 // create the bounding volume for the link
-                KinBody::Link::Geometry _tmpgeometry(boost::shared_ptr<KinBody::Link>(), *begingeom);
-                fcl::AABB enclosingBV = ConvertAABBToFcl(_tmpgeometry.ComputeAABB(Transform()));
-                for(GeometryInfoIterator it = ++begingeom; it != endgeom; ++it) {
-                    KinBody::Link::Geometry _tmpgeometry(boost::shared_ptr<KinBody::Link>(), *it);
-                    enclosingBV += ConvertAABBToFcl(_tmpgeometry.ComputeAABB(Transform()));
+                fcl::BVHModel<fcl::OBB> model;
+                model.beginModel();
+                // TODO : Check if I can assume that the collision mesh are already initialized
+                for(GeometryInfoIterator it = begingeom; it != endgeom; ++it) {
+                    _AddGeomInfoToBVHSubmodel(model, *it);
                 }
-                CollisionGeometryPtr pfclgeomBV = std::make_shared<fcl::Box>(enclosingBV.max_ - enclosingBV.min_);
-                CollisionObjectPtr pfclcollBV = boost::make_shared<fcl::CollisionObject>(pfclgeomBV);
-                Transform trans(Vector(1,0,0,0),ConvertVectorFromFCL(0.5 * (enclosingBV.min_ + enclosingBV.max_)));
-                pfclcollBV->setUserData(link.get());
-                link->linkBV = std::make_pair(trans, pfclcollBV);
+                model.endModel();
+                OPENRAVE_ASSERT_OP( model.getNumBVs(), !=, 0);
+                link->linkBV = _CreateTransformCollisionPairFromOBB(model.getBV(0).bv);
+                link->linkBV.second->setUserData(link.get());
             }
 
             //link->nLastStamp = pinfo->nLastStamp;
@@ -280,7 +285,7 @@ public:
         // if the attachedBodies callback is not set, we set it
         pinfo->_bodyAttachedCallback = pbody->RegisterChangeCallback(KinBody::Prop_BodyAttached, boost::bind(&FCLSpace::_ResetAttachedBodyCallback, boost::bind(&OpenRAVE::utils::sptr_from<FCLSpace>, weak_space()), boost::weak_ptr<KinBodyInfo>(pinfo)));
 
-        _currentpinfo[pbody->GetEnvironmentId()] = pinfo;
+        _currentpinfo[(uintptr_t) pbody.get()] = pinfo;
         //pbody->SetUserData(_userdatakey, pinfo);
         _setInitializedBodies.insert(pbody);
 
@@ -340,7 +345,7 @@ public:
             else {
                 RAVELOG_VERBOSE_FORMAT("FCLSpace : switching to geometry %s for kinbody %s (id = %d) (env = %d)", groupname%pbody->GetName()%pbody->GetEnvironmentId()%_penv->GetId());
                 // Set the current user data to use the KinBodyInfoPtr associated to groupname
-                _currentpinfo[pbody->GetEnvironmentId()] = pinfo;
+                _currentpinfo[(uintptr_t) pbody.get()] = pinfo;
                 //pbody->SetUserData(_userdatakey, pinfo);
 
                 // Revoke the information inside the cache so that a potentially outdated object does not survive
@@ -434,7 +439,7 @@ public:
 
     KinBodyInfoPtr GetInfo(KinBodyConstPtr pbody) const
     {
-        std::map< int, KinBodyInfoPtr >::const_iterator it = _currentpinfo.find(pbody->GetEnvironmentId());
+        std::map< uintptr_t, KinBodyInfoPtr >::const_iterator it = _currentpinfo.find((uintptr_t) pbody.get());
         if( it == _currentpinfo.end()) {
             return KinBodyInfoPtr();
         }
@@ -451,8 +456,8 @@ public:
             if( !!pinfo ) {
                 pinfo->Reset();
             }
-            _currentpinfo.erase(pbody->GetEnvironmentId());
             _cachedpinfo.erase(pbody->GetEnvironmentId());
+            _currentpinfo.erase((uintptr_t) pbody.get());
 //            bool is_consistent = pbody->RemoveUserData(_userdatakey);
 //            if( !is_consistent ) {
 //                RAVELOG_WARN("inconsistency detected with fclspace user data\n");
@@ -722,7 +727,7 @@ private:
 
     std::set<KinBodyConstPtr> _setInitializedBodies; ///< Set of the kinbody initialized in this space
     std::map< int, std::map< std::string, KinBodyInfoPtr > > _cachedpinfo; ///< Associates to each body id and geometry group name the corresponding kinbody info if already initialized and not currently set as user data
-    std::map< int, KinBodyInfoPtr> _currentpinfo;
+    std::map<uintptr_t, KinBodyInfoPtr> _currentpinfo;
 };
 
 #ifdef RAVE_REGISTER_BOOST
